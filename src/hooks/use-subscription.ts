@@ -2,22 +2,13 @@
 import { useState, useEffect } from 'react';
 import { 
   SUBSCRIPTION_PLANS, 
-  type SubscriptionPlan,
-  type SubscriptionTier
+  SubscriptionTier,
+  SubscriptionStatus,
+  type SubscriptionData
 } from '@/types/subscription';
 
-interface SubscriptionData {
-  planId: SubscriptionTier;
-  plan: string;
-  status: 'active' | 'canceled' | 'past_due' | 'incomplete' | 'trialing';
-  stripeCustomerId?: string;
-  stripeSubscriptionId?: string;
-  currentPeriodEnd: Date;
-  isCanceled?: boolean;
-}
-
 export interface UseSubscriptionReturn {
-  plan: SubscriptionPlan;
+  subscription: SubscriptionData | null;
   isLoading: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
@@ -46,16 +37,8 @@ export function useSubscription(): UseSubscriptionReturn {
     fetchSubscription();
   }, []);
 
-  // Get the current plan based on subscription or default to FREE
-  const currentPlan = data 
-    ? SUBSCRIPTION_PLANS[data.planId] 
-    : SUBSCRIPTION_PLANS.FREE;
-
   return {
-    plan: {
-      ...currentPlan,
-      status: data?.status || 'active',
-    },
+    subscription: data,
     isLoading,
     error,
     refresh: fetchSubscription

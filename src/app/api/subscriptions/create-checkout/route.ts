@@ -1,90 +1,64 @@
-// src/app/api/subscriptions/create-checkout/route.ts
-import { NextResponse } from 'next/server';
-import { auth, clerkClient } from '@clerk/nextjs/server';
-import { stripe } from '@/lib/stripe';
-import dbConnect from '@/lib/db/connection';
-import { Subscription } from '@/lib/db/models/subscription';
-import { absoluteUrl } from '@/lib/utils';
-import { SUBSCRIPTION_PLANS, SubscriptionTier } from '@/types/subscription';
-import { handleApiError, ApiError } from '@/lib/api/error-handler';
+import { NextRequest, NextResponse } from "next/server";
+import { auth, clerkClient } from "@clerk/nextjs/server";
+import { stripe } from "@/lib/stripe";
+import { SUBSCRIPTION_PLANS, SubscriptionTier } from "@/types/subscription";
+import { absoluteUrl } from "@/lib/utils";
+import { ApiError } from "@/lib/api/error-handler";
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
-    // 1. Get authenticated user
     const { userId } = await auth();
     if (!userId) {
       throw new ApiError('Unauthorized', 401, 'UNAUTHORIZED');
     }
 
-    // 2. Get and validate request data
     const { planId } = await req.json();
-    const plan = SUBSCRIPTION_PLANS[planId as SubscriptionTier];
-    
-    if (!plan?.stripePriceId) {
-      throw new ApiError('Invalid plan selected', 400, 'INVALID_PLAN');
-    }
 
-    // 3. Get user from Clerk
-    const user = await (await clerkClient()).users.getUser(userId);
-    const email = user.emailAddresses[0].emailAddress;    
-
-    await dbConnect();
-
-    // 4. Check existing subscription
-    const existingSubscription = await Subscription.findOne({ 
-      userId,
-      status: { $in: ['active', 'trialing'] }
-    });
-
-    if (existingSubscription?.stripeSubscriptionId) {
+    // Validate plan exists in SubscriptionTier enum
+    if (!Object.values(SubscriptionTier).includes(planId as SubscriptionTier)) {
       throw new ApiError(
-        'Active subscription exists', 
-        400, 
-        'SUBSCRIPTION_EXISTS'
+        'Invalid subscription plan selected',
+        400,
+        'INVALID_PLAN'
       );
     }
 
-    // 5. Get or create Stripe customer
-    let customer;
-    if (existingSubscription?.stripeCustomerId) {
-      customer = await stripe.customers.retrieve(existingSubscription.stripeCustomerId);
-    } else {
-      customer = await stripe.customers.create({
-        email,
-        metadata: {
-          userId,
-          clerkId: userId,
-          planId
-        }
-      });
+    // Get plan details
+    const plan = SUBSCRIPTION_PLANS[planId as SubscriptionTier];
+
+    // Check if plan is free
+    if (planId === SubscriptionTier.FREE) {
+      throw new ApiError(
+        'Free plan cannot be purchased',
+        400,
+        'PLAN_NOT_PURCHASABLE'
+      );
     }
 
-    // 6. Create or update subscription record with plan features
-    await Subscription.findOneAndUpdate(
-      { userId },
-      {
-        userId,
-        planId,
-        plan: planId as SubscriptionTier,
-        stripeCustomerId: customer.id,
-        status: 'incomplete',
-        features: plan.limits.features,
-        limits: {
-          maxEvents: plan.limits.eventsPerMonth,
-          maxGuestsPerEvent: plan.limits.guestsPerEvent
-        },
-        usage: {
-          eventsCreated: 0,
-          totalGuests: 0,
-          lastReset: new Date()
-        }
-      },
-      { upsert: true }
-    );
+    // Verify stripePriceId exists and is valid
+    if (!plan.stripePriceId) {
+      throw new ApiError(
+        'Selected plan is not available for purchase',
+        400,
+        'PLAN_NOT_PURCHASABLE'
+      );
+    }
 
-    // 7. Create checkout session with proper metadata
+    // Get user's email from Clerk using clerkClient
+    const user = await (await clerkClient()).users.getUser(userId);
+    
+    if (!user?.emailAddresses?.[0]?.emailAddress) {
+      throw new ApiError(
+        'User email not found',
+        400,
+        'USER_EMAIL_NOT_FOUND'
+      );
+    }
+
+    // Create checkout session
     const session = await stripe.checkout.sessions.create({
-      customer: customer.id,
+      customer_email: user.emailAddresses[0].emailAddress,
+      billing_address_collection: 'required',
       line_items: [
         {
           price: plan.stripePriceId,
@@ -92,33 +66,50 @@ export async function POST(req: Request) {
         },
       ],
       mode: 'subscription',
-      success_url: absoluteUrl('/settings/subscription?success=true'),
-      cancel_url: absoluteUrl('/settings/subscription?canceled=true'),
       allow_promotion_codes: true,
-      billing_address_collection: 'auto',
       subscription_data: {
         metadata: {
           userId,
-          planId,
-          features: JSON.stringify(plan.limits.features),
-          maxEvents: plan.limits.eventsPerMonth,
-          maxGuestsPerEvent: plan.limits.guestsPerEvent
+          planId
         },
-        trial_period_days: 14
+        trial_period_days: plan.trialDays || undefined,
       },
       metadata: {
         userId,
         planId
-      }
+      },
+      success_url: absoluteUrl('/settings/subscription?success=true'),
+      cancel_url: absoluteUrl('/settings/subscription?canceled=true'),
     });
 
-    return NextResponse.json({ 
-      url: session.url,
-      sessionId: session.id,
-      customerId: customer.id 
-    });
+    if (!session.url) {
+      throw new ApiError(
+        'Failed to create checkout session',
+        500,
+        'CHECKOUT_SESSION_CREATION_FAILED'
+      );
+    }
+
+    return NextResponse.json({ url: session.url });
   } catch (error) {
     console.error('Error creating checkout session:', error);
-    return handleApiError(error);
+    
+    if (error instanceof ApiError) {
+      return NextResponse.json(
+        { 
+          error: error.message,
+          code: error.code 
+        },
+        { status: error.statusCode }
+      );
+    }
+
+    return NextResponse.json(
+      { 
+        error: 'Internal server error',
+        code: 'INTERNAL_SERVER_ERROR'
+      },
+      { status: 500 }
+    );
   }
 }

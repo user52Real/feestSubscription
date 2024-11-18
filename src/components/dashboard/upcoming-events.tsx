@@ -1,4 +1,3 @@
-// src/components/dashboard/upcoming-events.tsx
 "use client";
 
 import { useEffect, useState } from "react";
@@ -34,7 +33,7 @@ interface ApiResponse {
   error?: string;
 }
 
-export function UpcomingEvents() {
+export function UpcomingEvents({maxEvents: maxEvents = 3}: {maxEvents?: number}) {
   const [events, setEvents] = useState<Event[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

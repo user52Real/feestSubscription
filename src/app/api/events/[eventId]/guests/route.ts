@@ -1,4 +1,3 @@
-// src/app/api/events/[eventId]/guests/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import dbConnect from "@/lib/db/connection";
@@ -7,12 +6,26 @@ import { Guest } from "@/lib/db/models/guest";
 import { sendEventInvitation } from "@/lib/email/notifications";
 import { createActivity } from "@/lib/activity/notifications";
 import { formatDateTime } from "@/lib/email/notifications";
+import { getCurrentSubscription } from "@/lib/subscription/subscription-service";
+import { FEATURES, SUBSCRIPTION_PLANS, SubscriptionTier } from "@/types/subscription";
+import { ApiError } from "@/lib/api/error-handler";
 
 export async function GET(
   req: NextRequest,
   { params }: { params: { eventId: string } }
 ) {
   try {
+    const { userId } = await auth();
+    if (!userId) {
+      throw new ApiError('Unauthorized', 401, 'UNAUTHORIZED');
+    }
+
+    // Get user's subscription
+    const subscription = await getCurrentSubscription(userId);
+    if (!subscription) {
+      throw new ApiError('Subscription not found', 403, 'SUBSCRIPTION_NOT_FOUND');
+    }
+
     await dbConnect();
     const { searchParams } = new URL(req.url);
     const status = searchParams.get("status");
@@ -42,27 +55,57 @@ export async function POST(
   try {
     const { userId } = await auth();
     if (!userId) {
-      return new NextResponse("Unauthorized", { status: 401 });
+      throw new ApiError('Unauthorized', 401, 'UNAUTHORIZED');
     }
+
+    // Get user's subscription
+    const subscription = await getCurrentSubscription(userId);
+    if (!subscription) {
+      throw new ApiError('Subscription not found', 403, 'SUBSCRIPTION_NOT_FOUND');
+    }
+
+    const plan = SUBSCRIPTION_PLANS[subscription.plan as SubscriptionTier];
 
     await dbConnect();
     const data = await req.json();
     const event = await Event.findById(params.eventId);
 
     if (!event) {
-      return new NextResponse("Event not found", { status: 404 });
+      throw new ApiError('Event not found', 404, 'EVENT_NOT_FOUND');
     }
 
     // Check if user has permission to invite
     if (event.organizerId !== userId && !event.coHosts.includes(userId)) {
-      return new NextResponse("Unauthorized", { status: 401 });
+      throw new ApiError('Unauthorized', 401, 'UNAUTHORIZED');
+    }
+
+    // Check if email invites feature is available
+    if (!plan.limits.features.includes(FEATURES.EMAIL_INVITES)) {
+      throw new ApiError(
+        'Email invites not available in your plan',
+        403,
+        'FEATURE_NOT_AVAILABLE'
+      );
+    }
+
+    // Get current guest count
+    const currentGuests = await Guest.countDocuments({ eventId: params.eventId });
+    
+    // Handle batch invitations
+    const emails = Array.isArray(data.email) ? data.email : [data.email];
+    
+    // Check if adding new guests would exceed the plan limit
+    if (currentGuests + emails.length > plan.limits.guestsPerEvent) {
+      throw new ApiError(
+        `Guest limit exceeded. Your plan allows ${plan.limits.guestsPerEvent} guests per event.`,
+        403,
+        'GUEST_LIMIT_EXCEEDED'
+      );
     }
 
     // Format event date and time
     const { formattedDate, formattedTime } = formatDateTime(new Date(event.startDate));
 
-    // Handle batch invitations
-    const emails = Array.isArray(data.email) ? data.email : [data.email];
     const results = await Promise.all(
       emails.map(async (email: string) => {
         // Check if guest already exists
@@ -88,22 +131,27 @@ export async function POST(
         });
 
         // Send invitation email with properly formatted params
-        await sendEventInvitation({
-          recipientEmail: email,
-          eventTitle: event.title,
-          eventDate: formattedDate,
-          eventTime: formattedTime,
-          location: `${event.location.venue}, ${event.location.address}`,
-          eventUrl: `${process.env.NEXT_PUBLIC_APP_URL}/events/${event.id}`,
-          personalMessage: data.message
-        });
+        if (plan.limits.features.includes(FEATURES.EMAIL_INVITES)) {
+          await sendEventInvitation({
+            recipientEmail: email,
+            eventTitle: event.title,
+            eventDate: formattedDate,
+            eventTime: formattedTime,
+            location: `${event.location.venue}, ${event.location.address}`,
+            eventUrl: `${process.env.NEXT_PUBLIC_APP_URL}/events/${event.id}`,
+            personalMessage: data.message
+          });
+        }
 
         // Create activity
         await createActivity({
           type: "guest.invited",
           userId,
           eventId: params.eventId,
-          metadata: { guestEmail: email }
+          metadata: { 
+            guestEmail: email,
+            subscriptionTier: subscription.plan 
+          }
         });
 
         return {
@@ -117,6 +165,9 @@ export async function POST(
     return NextResponse.json(results);
   } catch (error) {
     console.error("Error inviting guests:", error);
+    if (error instanceof ApiError) {
+      return new NextResponse(error.message, { status: error.statusCode });
+    }
     return new NextResponse("Internal Error", { status: 500 });
   }
 }

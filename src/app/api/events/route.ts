@@ -7,7 +7,7 @@ import { handleApiError, ApiError } from '@/lib/api/error-handler';
 import { analyzeQueryPerformance } from '@/lib/db/utils/performance';
 import { trackEventCreation } from "@/lib/subscription/usage-tracking";
 import { checkFeatureAccess } from "@/lib/subscription/feature-gates";
-import { FEATURES, SUBSCRIPTION_PLANS, SubscriptionTier } from "@/types/subscription";
+import { FEATURES, SUBSCRIPTION_PLANS, SubscriptionTier, SubscriptionStatus } from "@/types/subscription";
 import { getCurrentSubscription } from "@/lib/subscription/subscription-service";
 
 export async function POST(req: NextRequest) {
@@ -17,51 +17,58 @@ export async function POST(req: NextRequest) {
       throw new ApiError('Unauthorized', 401, 'UNAUTHORIZED');
     }
 
-    // Get current subscription first
     const subscription = await getCurrentSubscription(userId);
-    if (!subscription) {
-      return new NextResponse(
-        "Subscription not found", 
-        { status: 403 }
-      );
+    if (!subscription || subscription.status !== SubscriptionStatus.ACTIVE) {
+      throw new ApiError('Invalid subscription', 403, 'INVALID_SUBSCRIPTION');
     }
 
-    const plan = SUBSCRIPTION_PLANS[subscription.planId as SubscriptionTier];
+    const plan = SUBSCRIPTION_PLANS[subscription.plan as keyof typeof SUBSCRIPTION_PLANS];
     
-    // Check if user has permission to create events
+    // Check if user has recurring events feature
     if (!plan.limits.features.includes(FEATURES.RECURRING_EVENTS)) {
-      return new NextResponse(
-        "Please upgrade your plan to create events.", 
-        { status: 403 }
+      throw new ApiError(
+        'Recurring events feature not available in your plan',
+        403,
+        'FEATURE_NOT_AVAILABLE'
       );
     }
 
-    // Check event creation limits
-    try {
-      await trackEventCreation(userId);
-    } catch (error) {
-      if (error instanceof Error && error.message === 'Monthly event limit reached') {
-        return new NextResponse(
-          `Event limit reached (${plan.limits.eventsPerMonth} per month). Please upgrade your plan.`, 
-          { status: 403 }
-        );
-      }
-      throw error;
+    // Check monthly event creation limit
+    if (subscription.usage.eventsCreated >= plan.limits.eventsPerMonth) {
+      throw new ApiError(
+        `Monthly event limit reached (${plan.limits.eventsPerMonth} events)`,
+        403,
+        'EVENT_LIMIT_REACHED'
+      );
     }
 
     await dbConnect();
-
     const data = await req.json();
 
-    // Validate the event data based on subscription limits
+    // Validate guest capacity against plan limits
     if (data.capacity > plan.limits.guestsPerEvent) {
-      return new NextResponse(
-        `Guest limit exceeded. Your plan allows up to ${plan.limits.guestsPerEvent} guests per event.`,
-        { status: 403 }
+      throw new ApiError(
+        `Guest limit exceeded (max: ${plan.limits.guestsPerEvent})`,
+        403,
+        'GUEST_LIMIT_EXCEEDED'
       );
     }
 
-    // Create the event
+    // Validate advance booking days
+    const eventStartDate = new Date(data.startDate);
+    const maxAdvanceDays = plan.limits.maxAdvanceBookingDays;
+    const maxDate = new Date();
+    maxDate.setDate(maxDate.getDate() + maxAdvanceDays);
+
+    if (eventStartDate > maxDate) {
+      throw new ApiError(
+        `Cannot create events more than ${maxAdvanceDays} days in advance`,
+        403,
+        'ADVANCE_BOOKING_EXCEEDED'
+      );
+    }
+
+    // Create event with plan-specific features
     const event = await Event.create({
       ...data,
       organizerId: userId,
@@ -69,10 +76,18 @@ export async function POST(req: NextRequest) {
       location: {
         venue: data.venue,
         address: data.address
+      },
+      features: {
+        waitlist: plan.limits.features.includes(FEATURES.WAITLIST),
+        customBranding: plan.limits.features.includes(FEATURES.CUSTOM_BRANDING),
+        multiOrganizer: plan.limits.features.includes(FEATURES.MULTI_ORGANIZER)
       }
     });   
 
-    // Convert to response format
+    // Track event creation for usage limits
+    await trackEventCreation(userId);
+
+    // Format response
     const responseEvent = {
       id: event._id.toString(),
       title: event.title,
@@ -88,6 +103,7 @@ export async function POST(req: NextRequest) {
       visibility: event.visibility,
       organizerId: event.organizerId,
       coHosts: event.coHosts || [],
+      features: event.features
     };
 
     // Revalidate paths
@@ -109,41 +125,36 @@ export async function GET(req: NextRequest) {
       throw new ApiError('Unauthorized', 401, 'UNAUTHORIZED');
     }
 
-    // Get current subscription
     const subscription = await getCurrentSubscription(userId);
-    if (!subscription) {
-      return new NextResponse(
-        "Subscription not found", 
-        { status: 403 }
-      );
+    if (!subscription || subscription.status !== SubscriptionStatus.ACTIVE) {
+      throw new ApiError('Invalid subscription', 403, 'INVALID_SUBSCRIPTION');
     }
 
-    const plan = SUBSCRIPTION_PLANS[subscription.planId as SubscriptionTier];
+    const plan = SUBSCRIPTION_PLANS[subscription.plan as keyof typeof SUBSCRIPTION_PLANS];
 
-    // Check if user has access to view events
+    // Verify basic analytics access
     if (!plan.limits.features.includes(FEATURES.BASIC_ANALYTICS)) {
-      return new NextResponse(
-        "Please upgrade your plan to view events.", 
-        { status: 403 }
+      throw new ApiError(
+        'Analytics feature not available in your plan',
+        403,
+        'FEATURE_NOT_AVAILABLE'
       );
     }
 
     await dbConnect();
 
-    // Parse query parameters
     const { searchParams } = new URL(req.url);
     const status = searchParams.get("status");
     const organizerId = searchParams.get("organizerId");
 
-    // Build query
     let query: any = { organizerId: userId };
     if (status) query.status = status;
-    if (organizerId) query.organizerId = organizerId;
+    if (organizerId && plan.limits.features.includes(FEATURES.MULTI_ORGANIZER)) {
+      query.organizerId = organizerId;
+    }
 
-    // Apply subscription limits
-    const limit = plan.limits.eventsPerMonth === -1 ? 
-      100 : // Default max for unlimited plans
-      plan.limits.eventsPerMonth;
+    const limit = plan.limits.eventsPerMonth === Infinity ? 
+      100 : plan.limits.eventsPerMonth;
 
     const events = await Event.find(query)
       .sort({ startDate: -1 })
@@ -164,6 +175,7 @@ export async function GET(req: NextRequest) {
       visibility: event.visibility,
       organizerId: event.organizerId,
       coHosts: event.coHosts || [],
+      features: event.features
     }));
 
     return NextResponse.json({

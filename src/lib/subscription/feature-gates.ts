@@ -53,7 +53,7 @@ export const FEATURE_GATES: FeatureGatesType = {
   }
 };
 
-export async function checkFeatureAccess(feature: Feature): Promise<boolean> {
+export async function checkFeatureAccess(feature: Feature, RECURRING_EVENTS: string): Promise<boolean> {
   try {
     const { userId } = await auth();
     if (!userId) return false;
@@ -74,7 +74,7 @@ export async function checkFeatureAccess(feature: Feature): Promise<boolean> {
 
 export function withFeatureAccess(feature: Feature) {
   return async function middleware(request: Request) {
-    const hasAccess = await checkFeatureAccess(feature);
+    const hasAccess = await checkFeatureAccess(feature, 'RECURRING_EVENTS');
     
     if (!hasAccess) {
       return new NextResponse("Feature not available in your plan", { status: 403 });

@@ -52,14 +52,14 @@ const SubscriptionSchema = new Schema({
   },
   plan: {
     type: String,
-    enum: ['free', 'pro', 'enterprise'],
-    default: 'freee',
+    enum: ['FREE', 'PRO', 'BUSINESS'],
+    default: 'free',
     required: true
   },
   status: {
     type: String,
-    enum: ['active', 'canceled', 'past_due', 'incomplete', 'trialing'],
-    default: 'incomplete'
+    enum: ['active', 'canceled', 'past_due', 'incomplete'],
+    default: 'active'
   },
   stripeCustomerId: String,
   stripeSubscriptionId: String,

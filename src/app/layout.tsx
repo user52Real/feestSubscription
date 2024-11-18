@@ -7,6 +7,7 @@ import './globals.css'
 import { ErrorBoundary } from 'react-error-boundary';
 import { GlobalError } from '@/components/error-boundary/global-error';
 import { AdSense } from "@/components/ads/AdSense";
+import { TooltipProvider } from '@/components/ui/tooltip'
 
 
 const inter = Inter({ subsets: ['latin'] })
@@ -23,7 +24,7 @@ export const metadata: Metadata = {
   openGraph: {
     type: 'website',
     locale: 'en_US',
-    url: 'https://your-domain.com',
+    url: 'https://shareflyt.xyz',
     title: 'Feest - Event Management Platform',
     description: 'Professional event management platform for organizing and managing events',
     siteName: 'Feest'
@@ -49,7 +50,7 @@ export default function RootLayout({
     <ClerkProvider dynamic={true}>
       <html lang="en" suppressHydrationWarning>
         <head>
-        <AdSense publisherId={process.env.NEXT_PUBLIC_GOOGLE_ADS_CLIENT_ID!} />
+          <AdSense publisherId={process.env.NEXT_PUBLIC_GOOGLE_ADS_CLIENT_ID!} />
         </head>
         <body className={inter.className}>
           <ThemeProvider
@@ -58,12 +59,12 @@ export default function RootLayout({
             enableSystem
             disableTransitionOnChange
           >
-            <ErrorBoundary 
-              FallbackComponent={GlobalError}              
-            >
-              {children}
-            </ErrorBoundary>
-            <Toaster />
+            <TooltipProvider>
+              <ErrorBoundary FallbackComponent={GlobalError}>
+                {children}
+              </ErrorBoundary>
+              <Toaster />
+            </TooltipProvider>
           </ThemeProvider>
         </body>
       </html>

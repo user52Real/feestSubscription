@@ -1,6 +1,28 @@
 import { useState, useCallback, Fragment, ReactNode, JSX, createElement } from "react";
 import { useSubscription } from "./use-subscription";
-import { Feature } from "@/types/subscription";
+import { Feature, SubscriptionPlan, SubscriptionTier } from "@/types/subscription";
+
+
+interface UseSubscriptionReturn {
+  plan: SubscriptionPlan;
+  isLoading: boolean;
+  subscription: {
+    planId: SubscriptionTier;
+    status: string;
+    currentPeriodEnd: Date;
+    isCanceled: boolean;
+    usage: {
+      eventsCreated: number;
+      totalGuests: number;
+      lastReset: Date;
+    };
+    limits: {
+      maxEvents: number;
+      maxGuestsPerEvent: number;
+      features: Feature[];
+    };
+  };
+}
 
 interface UseFeatureAccessReturn {
   checkFeature: (feature: Feature) => boolean;
@@ -15,17 +37,17 @@ interface FeatureGateProps {
 }
 
 export function useFeatureAccess(): UseFeatureAccessReturn {
-  const { plan, isLoading } = useSubscription();
+  const { subscription, isLoading } = useSubscription() as unknown as UseSubscriptionReturn;
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [requiredFeature, setRequiredFeature] = useState<Feature | null>(null);
 
   const checkFeature = useCallback((feature: Feature): boolean => {
-    if (isLoading || !plan || !plan.limits || !plan.limits.features) {
+    if (isLoading || !subscription || !subscription.limits || !subscription.limits.features) {
       return false;
     }
 
-    return plan.limits.features.includes(feature);
-  }, [isLoading, plan]);
+    return subscription.limits.features.includes(feature);
+  }, [isLoading, subscription]);
 
   const showUpgradeDialog = useCallback((feature: Feature) => {
     setRequiredFeature(feature);
